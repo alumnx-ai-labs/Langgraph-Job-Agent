@@ -1,4 +1,4 @@
-# LangGraph Multi-Agent — JD Intake Pipeline
+# LangGraph Job Agent
 
 A companion repo to [Ai_Agent_new](https://github.com/alumnx-ai-labs/Ai_Agent_new), teaching **LangGraph** instead of LangChain's `create_agent()`.
 
