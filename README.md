@@ -1,87 +1,174 @@
-# LangGraph Job Agent
+# LangGraph Job Agent (Claude + MongoDB)
 
-A companion repo to [Ai_Agent_new](https://github.com/alumnx-ai-labs/Ai_Agent_new), teaching **LangGraph** instead of LangChain's `create_agent()`.
+A job-description intake pipeline built with **LangGraph** and **Claude** (Anthropic). A recruiter pastes a messy job description (JD); the pipeline extracts the key fields, asks for anything missing, rejects duplicates, scores and rewrites the text if needed, and finally publishes it to MongoDB.
 
-**Important framing:** despite the repo name, this example is not "agents talking to agents." Every node here is a deterministic step — some plain Python (duplicate check, routing rules), some a single LLM call for one specific job (extraction, scoring, rewriting). None of them reason over their own tools in a loop the way Day 1's agent did. The lesson is **LangGraph as a workflow engine**: explicit typed state, conditional branching, bounded retry loops, and a human-in-the-loop pause — not multi-agent orchestration.
+It is a **workflow**, not a team of agents. Every node is a fixed step: some are plain Python (duplicate check, routing rules), some make a single LLM call for one job (extraction, scoring, rewriting). LangGraph provides typed state, conditional branching, bounded retry loops, and a human-in-the-loop pause that survives a restart.
 
-## The Use Case
+You can run it two ways: a small **web chat UI** (`app.py`) or the **command line** (`jd_intake_pipeline.py`).
 
-Recruiters submit messy job descriptions (JDs) — incomplete, duplicate, vague, or biased. Rather than let a raw JD hit the database unchecked, this pipeline cleans, scores, deduplicates, and only then publishes it — asking a human for help when it can't proceed alone.
+## What you need
+
+| Requirement | Notes |
+|---|---|
+| Python 3.10 or newer | 3.11 to 3.13 is the safest choice |
+| An Anthropic API key | https://console.anthropic.com/settings/keys (API usage is billed) |
+| A MongoDB Atlas cluster (free M0 tier) | Used for the duplicate check and for publishing jobs |
 
 ## Setup
 
-### 1. Clone the repo
+### 1. Get the code
+
 ```bash
-git clone https://github.com/alumnx-ai-labs/LangGraph_Multi_Agent.git
-cd LangGraph_Multi_Agent
+git clone https://github.com/alumnx-ai-labs/Langgraph-Job-Agent.git
+cd Langgraph-Job-Agent
 ```
 
 ### 2. Create and activate a virtual environment
+
 ```bash
-python -m venv myenv
-myenv\Scripts\activate      # Windows
-# source myenv/bin/activate # macOS/Linux
+python -m venv .venv
+
+# Windows (PowerShell)
+.venv\Scripts\Activate.ps1
+# Windows (cmd)
+.venv\Scripts\activate.bat
+# macOS / Linux
+source .venv/bin/activate
 ```
 
-### 3. Install dependencies
+### 3. Install the dependencies
+
 ```bash
 pip install -r requirements.txt
 ```
 
-### 4. Get a free Gemini API key
-[aistudio.google.com/apikey](https://aistudio.google.com/apikey) — sign in, **Create API key**.
+### 4. Get an Anthropic API key
 
-### 5. Get a free MongoDB Atlas cluster
-Same as `Ai_Agent_new` — see that repo's README for the full walkthrough (sign up, free M0 cluster, database user, IP allowlist, connection string). This pipeline uses a different database name (`jd_intake_db`), so it won't collide with Day 1's data even on the same cluster.
+1. Sign in at https://console.anthropic.com.
+2. Open **Settings → API keys** and click **Create key**.
+3. Copy the key (it starts with `sk-ant-`). You will not be able to see it again.
 
-### 6. Set up `.env`
+### 5. Create a free MongoDB Atlas cluster
+
+1. Sign up at https://www.mongodb.com/cloud/atlas/register and create a new project.
+2. Click **Create** a cluster and choose the free **M0** tier. Pick any region near you.
+3. **Database Access** → **Add New Database User**. Choose a username and password and keep them. Use letters and digits only in the password, or you must URL-encode special characters in the connection string.
+4. **Network Access** → **Add IP Address**. Add your current IP (**Add Current IP Address**). For a quick local test only, you can allow `0.0.0.0/0`.
+5. **Database** → **Connect** on your cluster → **Drivers** → copy the connection string. It looks like:
+   `mongodb+srv://<username>:<password>@cluster0.xxxxx.mongodb.net/`
+6. Replace `<username>` and `<password>` with the database user from step 3.
+
+The app creates its own database (`jd_intake_db`) and collection (`jobs`) on first use. You do not need to create them.
+
+### 6. Create your `.env` file
+
 ```bash
+# macOS / Linux
 cp .env.example .env
+# Windows (PowerShell)
+copy .env.example .env
 ```
-Fill in:
+
+Open `.env` and fill in the two required values:
+
 ```env
-GOOGLE_API_KEY=your_gemini_api_key_here
+ANTHROPIC_API_KEY=sk-ant-your-key-here
 MONGO_URI=mongodb+srv://your_username:your_password@cluster0.xxxxx.mongodb.net/
 ```
 
-## Usage
+| Variable | Required | Description |
+|---|---|---|
+| `ANTHROPIC_API_KEY` | Yes | Your Anthropic API key. Never commit it. |
+| `MONGO_URI` | Yes | Your MongoDB Atlas connection string. |
+| `ANTHROPIC_MODEL` | No | Claude model name. Default: `claude-sonnet-5-5`. Set a smaller model to reduce cost. |
 
-### Web UI
+`.env` is listed in `.gitignore`, so it will not be committed.
 
-A minimal Flask chat UI wraps the same pipeline:
+## Run it
+
+### Option A: Web chat UI
+
 ```bash
 python app.py
 ```
-Open [http://127.0.0.1:5000](http://127.0.0.1:5000) and paste a JD into the chat. If required fields are missing, the assistant asks for them one at a time — just reply in the input box. Under the hood, each browser conversation gets its own LangGraph `thread_id`: the first submission starts a fresh run, and every reply while a question is pending resumes that same paused thread via `Command(resume=...)`, all backed by the same `checkpoints.sqlite` the CLI uses below.
 
-### CLI
+Open http://127.0.0.1:5000 and paste a job description into the chat. If a required field is missing, the assistant asks for it one question at a time. Just type your answer in the same box.
 
-Submit a JD:
+Try this first:
+
+```
+Senior Backend Engineer at Acme, Bangalore, 5+ years, hybrid. Building our core platform APIs.
+```
+
+All five fields are present, so it goes straight to the duplicate check and scoring. Then try a post with gaps, for example `We need a backend engineer at Acme.`, and it will ask for the location, experience and work mode.
+
+Submit the **same** JD twice to see the duplicate rejection (`Status: rejected`).
+
+### Option B: Command line
+
 ```bash
 python jd_intake_pipeline.py "Senior Backend Engineer at Acme, Bangalore, 5+ years, hybrid. Building our core platform APIs."
 ```
 
-If required fields are missing, the pipeline asks for them **one at a time**, right there in the terminal:
+If required fields are missing, it asks one at a time in the terminal:
+
 ```
 [thread_id: 8f2a...]
 
 What is the location?
 >
 ```
-Type your answer and press enter; if another field is still missing, it asks for that one next. Once every required field has an answer, it proceeds straight to duplicate checking (no re-parsing needed, since each answer is taken verbatim).
 
-### Proving it survives being killed
+Type the answer and press Enter. When all fields are filled, it carries on automatically. At the end it prints the final status and a log of what each node did. A published job prints its `job_id`.
 
-The interactive loop above is the normal path — but the whole reason this uses a persistent `SqliteSaver` checkpointer (not `MemorySaver`) is that the pipeline's state doesn't live in that Python process at all; it's in `checkpoints.sqlite`, keyed by `thread_id`. To prove that:
+### Prove that it survives being killed
 
-1. Submit a JD with missing fields, get asked a question, then **close the terminal entirely** instead of answering (or `Ctrl+C`).
-2. Open a **new** terminal and resume with:
+The pipeline state is saved in `checkpoints.sqlite`, keyed by `thread_id`, not kept in the running process.
+
+1. Submit a JD with a missing field and, at the question, close the terminal (or press `Ctrl+C`). Note the `thread_id` that was printed.
+2. Open a new terminal in the project folder, activate the environment again and run:
+
    ```bash
    python jd_intake_pipeline.py --resume 8f2a... "Bangalore"
    ```
-   using the `thread_id` printed in step 1. It picks up exactly where it left off - a genuinely different process, not an in-memory loop that only looks persistent.
 
-## State
+   Use your own `thread_id` and your answer. It carries on from exactly where it stopped.
+
+## How it works
+
+```
+START → parse_jd
+parse_jd ──[fields missing]──→ request_missing_info
+         └─[complete]────────→ check_duplicate
+
+request_missing_info ──[more fields missing, fewer than 6 questions asked]──→ request_missing_info
+                     ├─[more fields missing, 6 questions asked]────────────→ escalate
+                     └─[all fields collected]──────────────────────────────→ check_duplicate
+
+check_duplicate ──[duplicate]──→ reject
+                └─[unique]─────→ score_quality
+
+score_quality ──[score ≥ 75]──────────────────────→ publish_job
+              ├─[score < 75, fewer than 2 rewrites]→ rewrite_jd → score_quality
+              └─[score < 75, 2 rewrites used]──────→ escalate
+
+publish_job → END     reject → END     escalate → END
+```
+
+| Node | Type | What it does |
+|---|---|---|
+| `parse_jd` | LLM | Extracts `title`, `company`, `location`, `exp`, `work_mode`; flags empty ones as missing |
+| `request_missing_info` | Human in the loop | `interrupt()` pauses the graph and asks for ONE missing field |
+| `check_duplicate` | Plain Python + MongoDB | Exact match on lowercased title and company |
+| `score_quality` | LLM | Scores clarity, specificity and bias-free language (0 to 100) |
+| `rewrite_jd` | LLM | Rewrites the JD using the feedback |
+| `publish_job` | Plain Python + MongoDB | Saves the job, status `published` |
+| `reject` | Terminal | Duplicate found, status `rejected` |
+| `escalate` | Terminal | Needs a person (too many questions or two failed rewrites), status `needs_input` |
+
+Constants you can change at the top of `jd_intake_pipeline.py`: `REQUIRED_FIELDS`, `QUALITY_THRESHOLD` (75), `MAX_REVISIONS` (2) and `MAX_MISSING_INFO_ATTEMPTS` (6).
+
+### State
 
 ```python
 class JDState(TypedDict):
@@ -99,88 +186,58 @@ class JDState(TypedDict):
     log: list                   # audit trail of what each node did
 ```
 
-## Nodes
+### Design decisions
 
-| Node | Does |
-|---|---|
-| `parse_jd` | LLM structured extraction → `parsed`, flags `missing_fields` |
-| `request_missing_info` | `interrupt()` — pauses, asks a human for one missing field, sets it directly in `parsed` |
-| `check_duplicate` | Plain DB lookup (exact match on lowercased title+company) → sets `duplicate_of` |
-| `score_quality` | LLM scores clarity, specificity, bias-free language → `quality_score` + feedback |
-| `rewrite_jd` | Rewrites using the feedback → `rewritten_jd`, increments `revision_count` |
-| `publish_job` | Writes to MongoDB → `job_id`, status `published` |
-| `reject` | Terminal: duplicate found |
-| `escalate` | Terminal: missing-info or quality-revision attempts exhausted, status `needs_input` |
+- **Rules, not the LLM, decide the path.** Duplicate detection and both retry limits are plain Python conditionals. A duplicate is a fact, and a stop rule that the LLM enforces on itself is not a real limit.
+- **`SqliteSaver`, not `MemorySaver`.** Only a persistent checkpointer survives a process restart.
+- **`escalate` is shared** by the missing-info limit and the rewrite limit. The pipeline never silently throws a JD away because it could not be polished in time. It hands off to a person.
+- **Missing fields are asked one at a time.** Each answer is written straight into `parsed` with no extra LLM call.
+- **Exact-match lowercase fields, not regex,** for the duplicate check, which avoids crashes on special characters.
 
-## Edges
+## Project structure
 
 ```
-START → parse_jd
-parse_jd  ──[fields missing]──→ request_missing_info (asks ONE field)
-          └─[complete]────────→ check_duplicate
-
-request_missing_info ──[fields still missing, attempts < 6]──→ request_missing_info   # ask next field
-                      ├─[fields still missing, attempts ≥ 6]──→ escalate
-                      └─[all fields collected]─────────────────→ check_duplicate
-
-check_duplicate ──[duplicate]──→ reject
-                └─[unique]─────→ score_quality
-
-score_quality ──[score ≥ 75]────────────────────→ publish_job
-              ├─[score < 75, revisions < 2]─────→ rewrite_jd → score_quality   # self-improvement loop
-              └─[score < 75, revisions ≥ 2]─────→ escalate
-
-publish_job → END      reject → END      escalate → END
-```
-
-Two things worth noticing: **the duplicate check and both retry caps are plain Python conditionals, not LLM decisions** — a duplicate is a fact, not a judgment call, and a circuit breaker you can't trust an LLM to enforce on itself isn't a circuit breaker. And **both loops (missing-info, quality-rewrite) land on the same `escalate` node** when they run out — this pipeline never auto-rejects a JD just because it couldn't get it polished or complete in time; it hands off to a human instead.
-
-## Design decisions worth knowing
-
-- **MongoDB, not a second database.** The duplicate check is a simple two-field lookup with no joins — doesn't need anything relational, and reuses the Atlas account already set up for Day 1.
-- **Exact-match lowercase fields, not regex.** Day 1's job search tool crashed when an unescaped keyword hit MongoDB's `$regex`. `jobs_db.py` here compares precomputed `title_lower`/`company_lower` fields instead — safer and faster.
-- **`SqliteSaver`, not `MemorySaver`.** Only a persistent checkpointer survives a process restart, which is the whole point of the pause/resume demo.
-- **`escalate` is shared** by both the missing-info cap and the quality-revision cap, rather than two separate "give up" nodes — same outcome (hand off to a human), one node.
-- **Missing fields are asked one at a time, not all at once.** Each answer is taken verbatim and written directly into `parsed` — no re-parsing, no loop back through `parse_jd`. Simpler, fewer LLM calls, and it reads like a normal short Q&A instead of one dense "please provide: X, Y, Z" prompt.
-
-## Project Structure
-
-```
-LangGraph_Multi_Agent/
-├── jd_intake_pipeline.py   # The graph: state, nodes, edges, CLI
-├── jobs_db.py              # MongoDB: duplicate check + publish
-├── app.py                  # Flask chat UI over the same graph
+Langgraph-Job-Agent/
+├── jd_intake_pipeline.py   The graph: state, nodes, edges, CLI
+├── jobs_db.py              MongoDB: duplicate check and publish
+├── app.py                  Flask chat UI over the same graph
 ├── templates/
-│   └── index.html          # Chat frontend (vanilla JS, no build step)
+│   └── index.html          Chat page (plain JavaScript, no build step)
 ├── requirements.txt
-├── .env.example
-├── .gitignore
-└── .env                    # Your API keys (not tracked in git)
+├── .env.example            Template for your .env
+└── .env                    Your real keys (not committed)
 ```
+
+`checkpoints.sqlite` is created the first time you run it. It is local run history and is not committed.
 
 ## Troubleshooting
 
-### MongoDB `ServerSelectionTimeoutError` / SSL handshake failures
-Almost always a missing IP allowlist entry, not a connectivity bug — Atlas rejects the TLS handshake for non-allowlisted IPs with an error that looks like a generic SSL failure. Check **Network Access** in Atlas and add your current IP.
+### `ModuleNotFoundError`
+The virtual environment is not active, or dependencies are not installed. Activate it and run `pip install -r requirements.txt` again.
 
-### Garbled characters (mojibake) in output
-Fixed via `sys.stdout.reconfigure(encoding="utf-8")` at the top of `jd_intake_pipeline.py` — Gemini's replies can contain accented characters, and Windows consoles don't default to UTF-8 stdout.
+### `authentication_error` / `invalid x-api-key`
+`ANTHROPIC_API_KEY` is missing or wrong. Check `.env` (no quotes or spaces around the key) and make sure you run the command from the project folder, because `.env` is read from the current directory.
 
-### "No GOOGLE_API_KEY found" / "MONGO_URI environment variable is not set"
-See `Ai_Agent_new`'s README troubleshooting section — same causes, same fixes.
+### `model: ... not found`
+Your account cannot use the default model. Set `ANTHROPIC_MODEL` in `.env` to a model you have access to.
 
-### Every LLM call hangs forever (LangSmith tracing enabled)
-If `LANGSMITH_TRACING=true` and requests to `ChatGoogleGenerativeAI` never return — no error, no timeout, just stuck — this is **not** a network problem. Confirmed via thread-dump (`faulthandler.dump_traceback_later`): the hang is in `platform.win32_ver()`, called synchronously by LangChain's tracer (`get_runtime_environment()` on the first traced event) to attach OS metadata to the trace. On Python 3.14 + certain Windows setups, `win32_ver()`'s WMI query never returns — this blocks the main thread before any request reaches LangSmith's servers (which, on their own, are reachable fine).
+### `MONGO_URI environment variable is not set`
+Add `MONGO_URI` to `.env`.
 
-This code forces tracing off unconditionally at import time (see the comment above `os.environ["LANGCHAIN_TRACING_V2"]` near the top of `jd_intake_pipeline.py`) specifically to avoid this, regardless of what `.env` says.
+### MongoDB `ServerSelectionTimeoutError` or SSL handshake errors
+Almost always a missing IP allowlist entry. Atlas rejects the connection from IP addresses it does not know, and the error looks like a generic SSL failure. In Atlas open **Network Access** and add your current IP. Also confirm the username and password in the connection string.
 
-To get tracing back:
-1. Check whether WMI itself is the problem — from an elevated PowerShell: `Get-Service Winmgmt`. If it's not `Running`, that's likely your actual fix; restart it and retest.
-2. If WMI is healthy but this still hangs, it may be specific to Python 3.14's `platform.win32_ver()` implementation — try a Python 3.11–3.13 virtualenv instead.
-3. Once either is confirmed fixed, remove the `os.environ[...]` overrides in `jd_intake_pipeline.py` to let `.env`'s `LANGSMITH_TRACING` take effect again.
+### Garbled characters in the terminal
+The script already switches stdout to UTF-8. If your terminal still shows broken characters, use a UTF-8 terminal such as Windows Terminal.
 
-Quick isolated repro, no LangChain involved, to confirm this on your own machine:
+### Every LLM call hangs forever (LangSmith tracing)
+On some Windows and Python 3.14 setups, LangChain's tracer calls `platform.win32_ver()`, which can block forever on a stuck WMI query. The code therefore forces LangSmith tracing off at import time (see the comment near the top of `jd_intake_pipeline.py`). To check whether your machine is affected:
+
 ```bash
 python -c "import platform; print(platform.win32_ver())"
 ```
-If that alone hangs, it's this issue.
+
+If that alone hangs, restart the Windows Management Instrumentation service (`Get-Service Winmgmt` in an elevated PowerShell) or use Python 3.11 to 3.13. To re-enable tracing, remove the `os.environ[...]` overrides in `jd_intake_pipeline.py` and set `LANGSMITH_TRACING=true` in `.env`.
+
+### "Address already in use" on port 5000
+Another program uses port 5000 (on macOS, AirPlay Receiver often does). Stop it, or change the last line of `app.py` to `app.run(debug=True, port=5001)`.

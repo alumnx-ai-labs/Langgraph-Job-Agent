@@ -16,14 +16,14 @@ import uuid
 from typing import Optional, TypedDict
 
 from dotenv import load_dotenv
-from langchain_google_genai import ChatGoogleGenerativeAI
+from langchain_anthropic import ChatAnthropic
 from langgraph.checkpoint.sqlite import SqliteSaver
 from langgraph.graph import END, START, StateGraph
 from langgraph.types import Command, interrupt
 
 from jobs_db import find_duplicate_job, publish_job_in_db
 
-# Gemini's replies can contain arbitrary Unicode (e.g. accented characters); on
+# LLM replies can contain arbitrary Unicode (e.g. accented characters); on
 # Windows consoles the default stdout encoding isn't UTF-8, so those characters
 # print as mojibake without this.
 sys.stdout.reconfigure(encoding="utf-8")
@@ -39,13 +39,18 @@ load_dotenv(override=True)
 # for how to check whether this affects you and how to re-enable tracing.
 # LANGSMITH_TRACING=false in .env isn't enough on its own - some tracing paths key
 # off LANGSMITH_API_KEY just being *present*. Force both off here so
-# ChatGoogleGenerativeAI.invoke() never takes that path.
+# llm.invoke() never takes that path.
 os.environ["LANGCHAIN_TRACING_V2"] = "false"
 os.environ["LANGSMITH_TRACING"] = "false"
 os.environ.pop("LANGSMITH_API_KEY", None)
 os.environ.pop("LANGCHAIN_API_KEY", None)
 
-llm = ChatGoogleGenerativeAI(model="gemini-3.5-flash-lite")
+# Reads ANTHROPIC_API_KEY from the environment (.env). Override the model with
+# ANTHROPIC_MODEL in .env, e.g. a smaller/cheaper Claude model.
+llm = ChatAnthropic(
+    model=os.getenv("ANTHROPIC_MODEL", "claude-sonnet-5-5"),
+    max_tokens=2048,
+)
 
 REQUIRED_FIELDS = ["title", "company", "location", "exp", "work_mode"]
 QUALITY_THRESHOLD = 75
@@ -69,14 +74,14 @@ class JDState(TypedDict):
 
 
 def extract_text(content) -> str:
-    """Gemini returns message content as a list of blocks instead of a plain string."""
+    """Chat models may return message content as a list of blocks instead of a plain string."""
     if isinstance(content, list):
         return "".join(block.get("text", "") for block in content if isinstance(block, dict) and block.get("type") == "text")
     return content
 
 
 def _strip_code_fence(text: str) -> str:
-    """Gemini often wraps JSON replies in ```json ... ``` fences even when told not to."""
+    """LLMs sometimes wrap JSON replies in ```json ... ``` fences even when told not to."""
     text = text.strip()
     if text.startswith("```"):
         text = text.split("\n", 1)[1] if "\n" in text else text[3:]

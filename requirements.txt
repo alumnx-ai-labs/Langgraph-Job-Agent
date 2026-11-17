@@ -1,6 +1,6 @@
 langgraph
 langgraph-checkpoint-sqlite
-langchain-google-genai
+langchain-anthropic
 python-dotenv
 requests
 pymongo
